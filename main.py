@@ -63,10 +63,10 @@ Examples:
     
     # Processing options
     parser.add_argument("--resize", nargs=2, type=int, metavar=("W", "H"),
-                        default=[640, 360],
-                        help="Resize frames before processing (default: 640 360)")
+                        default=None,
+                        help="Resize frames before processing (default: no resize)")
     parser.add_argument("--no-resize", action="store_true",
-                        help="Process at original resolution")
+                        help="Process at original resolution (default)")
     parser.add_argument("--gpu", action="store_true",
                         help="Enable GPU acceleration (if available)")
     parser.add_argument("--workers", type=int, default=1,
@@ -89,7 +89,7 @@ def process_single(args) -> str:
     """Process a single video."""
     logger.info("Starting single video processing")
     
-    resize = None if args.no_resize else tuple(args.resize)
+    resize = None if args.no_resize else (tuple(args.resize) if args.resize else None)
     
     pipeline = VideoRemovalPipeline(
         iopaint_url=args.api_url,
@@ -111,7 +111,7 @@ def process_batch(args) -> dict:
     """Process a batch of videos."""
     logger.info("Starting batch processing")
     
-    resize = None if args.no_resize else tuple(args.resize)
+    resize = None if args.no_resize else (tuple(args.resize) if args.resize else None)
     
     processor = BatchProcessor(
         iopaint_url=args.api_url,

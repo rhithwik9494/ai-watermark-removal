@@ -66,7 +66,8 @@ class IOPaintClient:
     def inpaint(self, 
                 image: np.ndarray, 
                 mask: np.ndarray,
-                resize: Optional[tuple] = None) -> Optional[np.ndarray]:
+                resize: Optional[tuple] = None,
+                dilate_mask: int = 0) -> Optional[np.ndarray]:
         """
         Inpaint image using mask via IOPaint API.
         
@@ -74,6 +75,7 @@ class IOPaintClient:
             image: Input image (BGR, uint8)
             mask: Binary mask (uint8, 255 = inpaint region)
             resize: Optional (width, height) to resize before sending
+            dilate_mask: Pixels to dilate mask before inpainting (ensures full coverage)
             
         Returns:
             Inpainted image (BGR, uint8) or None on failure
@@ -85,6 +87,11 @@ class IOPaintClient:
         if resize is not None:
             image = cv2.resize(image, resize, interpolation=cv2.INTER_AREA)
             mask = cv2.resize(mask, resize, interpolation=cv2.INTER_NEAREST)
+        
+        # Dilate mask to ensure full watermark coverage
+        if dilate_mask > 0:
+            kernel = np.ones((dilate_mask, dilate_mask), np.uint8)
+            mask = cv2.dilate(mask, kernel, iterations=1)
         
         # Encode image to PNG bytes
         success, img_encoded = cv2.imencode(".png", image)
@@ -98,7 +105,28 @@ class IOPaintClient:
             logger.error("Failed to encode mask to PNG")
             return None
         
-        # Prepare multipart form data
+        # Try multipart form data first, fallback to base64 JSON
+        result_img = self._inpaint_multipart(image, mask, img_encoded, mask_encoded)
+        
+        if result_img is None:
+            logger.warning("Multipart upload failed, trying base64 JSON fallback")
+            result_img = self._inpaint_base64(img_encoded, mask_encoded)
+        
+        if result_img is None:
+            return None
+        
+        # Resize back to original if needed
+        if resize is not None:
+            result_img = cv2.resize(result_img, (original_shape[1], original_shape[0]), 
+                                    interpolation=cv2.INTER_LANCZOS4)
+        
+        elapsed = time.time() - start_time
+        logger.debug(f"Inpaint completed in {elapsed:.2f}s")
+        
+        return result_img
+    
+    def _inpaint_multipart(self, image, mask, img_encoded, mask_encoded) -> Optional[np.ndarray]:
+        """Try multipart form-data upload."""
         files = {
             "image": ("image.png", io.BytesIO(img_encoded.tobytes()), "image/png"),
             "mask": ("mask.png", io.BytesIO(mask_encoded.tobytes()), "image/png")
@@ -109,7 +137,7 @@ class IOPaintClient:
         }
         
         try:
-            logger.debug(f"Sending inpaint request to {self.api_url}")
+            logger.debug(f"Sending multipart inpaint request to {self.api_url}")
             
             response = self.session.post(
                 self.api_url,
@@ -119,7 +147,7 @@ class IOPaintClient:
             )
             
             if response.status_code != 200:
-                logger.error(f"API error: status={response.status_code}, body={response.text[:200]}")
+                logger.warning(f"Multipart API error: status={response.status_code}, body={response.text[:200]}")
                 return None
             
             # Decode raw binary response
@@ -127,27 +155,59 @@ class IOPaintClient:
             result_img = cv2.imdecode(result, cv2.IMREAD_COLOR)
             
             if result_img is None:
-                logger.error("Failed to decode API response image")
+                logger.warning("Failed to decode multipart API response image")
                 return None
-            
-            # Resize back to original if needed
-            if resize is not None:
-                result_img = cv2.resize(result_img, (original_shape[1], original_shape[0]), 
-                                        interpolation=cv2.INTER_LANCZOS4)
-            
-            elapsed = time.time() - start_time
-            logger.debug(f"Inpaint completed in {elapsed:.2f}s")
             
             return result_img
             
         except requests.exceptions.ConnectionError as e:
-            logger.error(f"Connection error to IOPaint API: {e}")
+            logger.warning(f"Multipart connection error: {e}")
             return None
         except requests.exceptions.Timeout as e:
-            logger.error(f"Request timeout after {self.timeout}s: {e}")
+            logger.warning(f"Multipart timeout after {self.timeout}s: {e}")
             return None
         except Exception as e:
-            logger.error(f"Unexpected error during inpaint: {e}")
+            logger.warning(f"Multipart unexpected error: {e}")
+            return None
+    
+    def _inpaint_base64(self, img_encoded, mask_encoded) -> Optional[np.ndarray]:
+        """Fallback: base64 JSON upload using pre-encoded buffers."""
+        try:
+            import base64
+            
+            img_b64 = base64.b64encode(img_encoded).decode("utf-8")
+            mask_b64 = base64.b64encode(mask_encoded).decode("utf-8")
+            
+            payload = {
+                "image": img_b64,
+                "mask": mask_b64,
+                "model": self.model
+            }
+            
+            logger.debug(f"Sending base64 JSON inpaint request to {self.api_url}")
+            
+            response = self.session.post(
+                self.api_url,
+                json=payload,
+                timeout=self.timeout
+            )
+            
+            if response.status_code != 200:
+                logger.warning(f"Base64 API error: status={response.status_code}, body={response.text[:200]}")
+                return None
+            
+            # Decode response
+            result = np.frombuffer(response.content, np.uint8)
+            result_img = cv2.imdecode(result, cv2.IMREAD_COLOR)
+            
+            if result_img is None:
+                logger.warning("Failed to decode base64 API response image")
+                return None
+            
+            return result_img
+            
+        except Exception as e:
+            logger.warning(f"Base64 fallback error: {e}")
             return None
     
     def health_check(self) -> bool:

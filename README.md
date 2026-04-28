@@ -125,6 +125,12 @@ python main.py -i data/videos/input.mp4 -o data/outputs/cleaned.mp4
 python main.py --batch -i data/videos -o data/outputs --workers 2
 ```
 
+### Resize for Faster Processing (Optional)
+
+```bash
+python main.py -i video.mp4 --resize 640 360 -o cleaned.mp4
+```
+
 ### 4. Launch GUI
 
 ```bash
@@ -145,8 +151,8 @@ Options:
   --output-dir          Output directory (batch mode)
   --api-url             IOPaint API URL (default: http://127.0.0.1:8080/api/v1/inpaint)
   --model               Model: lama (default), ldm, mat
-  --resize W H          Resize frames (default: 640 360)
-  --no-resize           Process at original resolution
+  --resize W H          Resize frames before processing (optional)
+  --no-resize           Process at original resolution (default)
   --gpu                 Enable GPU acceleration
   --workers N           Parallel workers for batch mode (default: 1)
   --no-cleanup          Keep temporary frame files

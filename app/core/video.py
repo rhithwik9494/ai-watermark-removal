@@ -178,7 +178,7 @@ class VideoProcessor:
                       audio_source: Optional[str] = None,
                       codec: str = "libx264",
                       crf: int = 18,
-                      preset: str = "medium") -> str:
+                      preset: str = "slow") -> str:
         """
         Rebuild video from frame sequence using FFmpeg.
         
@@ -210,7 +210,7 @@ class VideoProcessor:
             # Use two-pass approach: build video first, then merge audio
             temp_video = output_path + ".temp.mp4"
             
-            # Step 1: Build video from frames
+            # Step 1: Build video from frames with high-quality settings
             cmd_video = [
                 self.ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
                 "-framerate", str(fps),
@@ -219,6 +219,9 @@ class VideoProcessor:
                 "-crf", str(crf),
                 "-preset", preset,
                 "-pix_fmt", "yuv420p",
+                "-profile:v", "high",
+                "-level", "4.2",
+                "-movflags", "+faststart",
                 "-an",  # No audio in first pass
                 temp_video
             ]
@@ -234,7 +237,7 @@ class VideoProcessor:
                 "-map", "1:a:0",
                 "-c:v", "copy",
                 "-c:a", "aac",
-                "-b:a", "192k",
+                "-b:a", "256k",
                 "-shortest",
                 output_path
             ]
@@ -260,6 +263,9 @@ class VideoProcessor:
                 "-crf", str(crf),
                 "-preset", preset,
                 "-pix_fmt", "yuv420p",
+                "-profile:v", "high",
+                "-level", "4.2",
+                "-movflags", "+faststart",
                 "-an",
                 output_path
             ]

@@ -19,8 +19,11 @@ class ColoredFormatter(logging.Formatter):
     def format(self, record):
         log_color = self.COLORS.get(record.levelname, self.COLORS['RESET'])
         reset = self.COLORS['RESET']
-        record.levelname = f"{log_color}{record.levelname}{reset}"
-        return super().format(record)
+        original_levelname = record.levelname
+        record.levelname = f"{log_color}{original_levelname}{reset}"
+        result = super().format(record)
+        record.levelname = original_levelname
+        return result
 
 
 def get_logger(name: str = "ai_watermark_removal", log_dir: str = "logs") -> logging.Logger:

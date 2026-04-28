@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from pathlib import Path
 
 from app.utils.logger import get_logger
@@ -10,10 +10,13 @@ logger = get_logger(__name__)
 
 class WatermarkDetector:
     """
-    Automatic watermark detection using low-variance analysis.
+    Automatic watermark detection using multi-method analysis.
     
-    Detects static watermarks by analyzing variance across multiple frames.
-    Static elements (watermarks) have low variance compared to moving content.
+    Detects static watermarks by trying multiple strategies:
+    1. Low-variance analysis (static elements)
+    2. Edge-enhanced detection (text/logos with borders)
+    3. Brightness/contrast threshold (white/light watermarks)
+    4. Bottom-right fallback (most common watermark location)
     """
     
     def __init__(self, 
@@ -21,7 +24,9 @@ class WatermarkDetector:
                  variance_threshold: float = 15.0,
                  min_watermark_area: float = 500.0,
                  morph_kernel_size: int = 5,
-                 dilation_iterations: int = 3):
+                 dilation_iterations: int = 3,
+                 mask_padding: int = 15,
+                 mask_dilation: int = 8):
         """
         Initialize detector parameters.
         
@@ -31,12 +36,16 @@ class WatermarkDetector:
             min_watermark_area: Minimum area for a valid watermark region
             morph_kernel_size: Kernel size for morphology operations
             dilation_iterations: Number of dilation iterations
+            mask_padding: Extra pixels to add around detected bbox
+            mask_dilation: Morphological dilation pixels for mask edges
         """
         self.sample_frames = sample_frames
         self.variance_threshold = variance_threshold
         self.min_watermark_area = min_watermark_area
         self.morph_kernel_size = morph_kernel_size
         self.dilation_iterations = dilation_iterations
+        self.mask_padding = mask_padding
+        self.mask_dilation = mask_dilation
     
     def detect_from_video(self, video_path: str) -> Optional[Tuple[int, int, int, int]]:
         """
@@ -136,6 +145,42 @@ class WatermarkDetector:
     
     def _detect_from_frames(self, gray_frames: list) -> Optional[Tuple[int, int, int, int]]:
         """
+        Multi-method detection. Tries several strategies in order.
+        
+        Returns:
+            Bounding box as (x, y, w, h) or None
+        """
+        logger.debug(f"Running multi-method detection on {len(gray_frames)} frames")
+        
+        # Method 1: Low-variance analysis (static elements)
+        bbox = self._detect_by_variance(gray_frames)
+        if bbox:
+            logger.info("Detection method: variance-based")
+            return bbox
+        
+        # Method 2: Edge-enhanced detection
+        bbox = self._detect_by_edges(gray_frames)
+        if bbox:
+            logger.info("Detection method: edge-enhanced")
+            return bbox
+        
+        # Method 3: Brightness threshold (bright watermarks)
+        bbox = self._detect_by_brightness(gray_frames)
+        if bbox:
+            logger.info("Detection method: brightness-based")
+            return bbox
+        
+        # Method 4: Bottom-right fallback (most common location)
+        bbox = self._detect_bottom_right(gray_frames[0])
+        if bbox:
+            logger.info("Detection method: bottom-right fallback")
+            return bbox
+        
+        logger.warning("All detection methods failed")
+        return None
+    
+    def _detect_by_variance(self, gray_frames: list) -> Optional[Tuple[int, int, int, int]]:
+        """
         Core detection logic using low-variance analysis.
         
         Algorithm:
@@ -154,17 +199,9 @@ class WatermarkDetector:
         # Compute variance across frames for each pixel
         variance_map = np.var(stack, axis=0)
         
-        # Normalize for visualization/debugging
-        var_norm = cv2.normalize(variance_map, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        
         # Threshold: low variance = static = watermark candidate
-        # Pixels with variance below threshold are likely watermarks
-        _, binary = cv2.threshold(
-            var_norm, 
-            int(self.variance_threshold), 
-            255, 
-            cv2.THRESH_BINARY_INV
-        )
+        # Threshold the RAW variance map (not normalized) for semantically correct behavior
+        binary = np.where(variance_map < self.variance_threshold, 255, 0).astype(np.uint8)
         
         # Morphology: open to remove noise, then dilate to fill gaps
         kernel_open = np.ones((self.morph_kernel_size, self.morph_kernel_size), np.uint8)
@@ -173,11 +210,89 @@ class WatermarkDetector:
         opened = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel_open)
         dilated = cv2.dilate(opened, kernel_dilate, iterations=self.dilation_iterations)
         
-        # Find contours
-        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        return self._contour_to_bbox(dilated, "variance")
+    
+    def _detect_by_edges(self, gray_frames: list) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Detect watermarks using edge analysis. Good for text/logos with sharp borders.
+        """
+        logger.debug("Trying edge-enhanced detection")
+        
+        # Use first frame for edge detection
+        frame = gray_frames[0]
+        
+        # Compute edges
+        edges = cv2.Canny(frame, 50, 150)
+        
+        # Dilate edges to connect nearby components
+        kernel = np.ones((5, 5), np.uint8)
+        edges_dilated = cv2.dilate(edges, kernel, iterations=2)
+        
+        return self._contour_to_bbox(edges_dilated, "edge")
+    
+    def _detect_by_brightness(self, gray_frames: list) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Detect bright watermark regions. Good for white/light watermarks.
+        """
+        logger.debug("Trying brightness-based detection")
+        
+        # Compute mean brightness across frames
+        stack = np.stack(gray_frames, axis=0).astype(np.float32)
+        mean_frame = np.mean(stack, axis=0).astype(np.uint8)
+        
+        # Detect bright areas
+        _, bright = cv2.threshold(mean_frame, 200, 255, cv2.THRESH_BINARY)
+        
+        # Also detect high-contrast edges in bright regions
+        grad_x = cv2.Sobel(mean_frame, cv2.CV_64F, 1, 0, ksize=3)
+        grad_y = cv2.Sobel(mean_frame, cv2.CV_64F, 0, 1, ksize=3)
+        gradient = np.sqrt(grad_x**2 + grad_y**2).astype(np.uint8)
+        _, grad_thresh = cv2.threshold(gradient, 50, 255, cv2.THRESH_BINARY)
+        
+        # Combine bright regions with edges
+        combined = cv2.bitwise_and(bright, grad_thresh)
+        
+        # Dilate to fill gaps
+        kernel = np.ones((7, 7), np.uint8)
+        combined = cv2.dilate(combined, kernel, iterations=2)
+        
+        return self._contour_to_bbox(combined, "brightness")
+    
+    def _detect_bottom_right(self, frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Fallback: assume watermark is in bottom-right corner.
+        This is the most common watermark placement.
+        """
+        logger.debug("Using bottom-right fallback detection")
+        
+        h, w = frame.shape[:2]
+        
+        # Define a region in the bottom-right (roughly 1/4 of frame)
+        region_w = w // 4
+        region_h = h // 6
+        x = w - region_w - 10
+        y = h - region_h - 10
+        
+        # Ensure valid coordinates
+        x = max(0, x)
+        y = max(0, y)
+        region_w = min(region_w, w - x)
+        region_h = min(region_h, h - y)
+        
+        if region_w < 20 or region_h < 20:
+            return None
+        
+        logger.info(f"Bottom-right fallback bbox: ({x}, {y}, {region_w}, {region_h})")
+        return (x, y, region_w, region_h)
+    
+    def _contour_to_bbox(self, binary: np.ndarray, method: str) -> Optional[Tuple[int, int, int, int]]:
+        """
+        Convert binary image to bounding box from largest contour.
+        """
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
         if not contours:
-            logger.debug("No contours found after morphology")
+            logger.debug(f"No contours found for method: {method}")
             return None
         
         # Find largest contour by area
@@ -185,47 +300,47 @@ class WatermarkDetector:
         area = cv2.contourArea(largest_contour)
         
         if area < self.min_watermark_area:
-            logger.debug(f"Largest contour area {area} below minimum {self.min_watermark_area}")
+            logger.debug(f"Largest contour area {area} below minimum {self.min_watermark_area} for method: {method}")
             return None
         
-        # Get bounding box
+        # Get bounding box (raw — padding is added in generate_mask)
         x, y, w, h = cv2.boundingRect(largest_contour)
         
-        # Add small padding
-        padding = 5
-        x = max(0, x - padding)
-        y = max(0, y - padding)
-        
-        logger.debug(f"Detected watermark bbox: ({x}, {y}, {w}, {h}), area={area}")
+        logger.debug(f"Detected watermark bbox ({method}): ({x}, {y}, {w}, {h}), area={area}")
         
         return (x, y, w, h)
     
     def generate_mask(self, frame_shape: Tuple[int, int], bbox: Tuple[int, int, int, int]) -> np.ndarray:
         """
-        Generate binary mask from bounding box.
+        Generate binary mask from bounding box with padding and dilation.
         
         Args:
             frame_shape: (height, width) of frame
             bbox: (x, y, w, h) bounding box
             
         Returns:
-            Binary mask with white (255) rectangle on black background
+            Binary mask with white (255) region on black background
         """
         h, w = frame_shape[:2]
         mask = np.zeros((h, w), dtype=np.uint8)
         
         x, y, bw, bh = bbox
         
-        # Clamp to frame bounds
-        x1 = max(0, x)
-        y1 = max(0, y)
-        x2 = min(w, x + bw)
-        y2 = min(h, y + bh)
+        # Add padding
+        x1 = max(0, x - self.mask_padding)
+        y1 = max(0, y - self.mask_padding)
+        x2 = min(w, x + bw + self.mask_padding)
+        y2 = min(h, y + bh + self.mask_padding)
         
         # Draw white filled rectangle
         cv2.rectangle(mask, (x1, y1), (x2, y2), 255, -1)
         
-        logger.debug(f"Generated mask for bbox: ({x1}, {y1}, {x2-x1}, {y2-y1})")
+        # Dilate mask to ensure full watermark coverage
+        if self.mask_dilation > 0:
+            kernel = np.ones((self.mask_dilation, self.mask_dilation), np.uint8)
+            mask = cv2.dilate(mask, kernel, iterations=1)
+        
+        logger.debug(f"Generated mask for bbox: ({x1}, {y1}, {x2-x1}, {y2-y1}) with dilation={self.mask_dilation}")
         
         return mask
 

@@ -38,7 +38,7 @@ class VideoRemovalPipeline:
     def __init__(self,
                  iopaint_url: str = "http://127.0.0.1:8080/api/v1/inpaint",
                  model: str = "lama",
-                 resize: Optional[Tuple[int, int]] = (640, 360),
+                 resize: Optional[Tuple[int, int]] = None,
                  use_gpu: bool = False,
                  cleanup: bool = True):
         """
@@ -112,9 +112,18 @@ class VideoRemovalPipeline:
             bbox = self.detector.detect_from_frame_files(frames_dir)
             
             if not bbox:
-                logger.warning("No watermark detected, copying original video")
-                self.file_manager.safe_copy(input_path, output_path)
-                return output_path
+                logger.warning("No watermark detected with multi-method, trying bottom-right fallback")
+                frame_files = self.file_manager.get_frame_files(frames_dir)
+                if frame_files:
+                    first_frame = cv2.imread(str(frame_files[0]))
+                    if first_frame is not None:
+                        gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+                        bbox = self.detector._detect_bottom_right(gray)
+                
+                if not bbox:
+                    logger.warning("No watermark detected, copying original video")
+                    self.file_manager.safe_copy(input_path, output_path)
+                    return output_path
             
             # Stage 3: Process frames with tracking + inpainting
             self._process_frames(
@@ -184,11 +193,14 @@ class VideoRemovalPipeline:
             success, bbox = self.tracker.update(frame)
             
             if not success or bbox == (0, 0, 0, 0):
-                logger.warning(f"Tracking failed for frame {i}, skipping inpaint")
-                # Copy original frame
-                out_path = Path(clean_frames_dir) / frame_path.name
-                cv2.imwrite(str(out_path), frame)
-                continue
+                logger.warning(f"Tracking failed for frame {i}, using last known bbox")
+                # Use last known bbox instead of copying original
+                bbox = self.tracker.get_last_bbox()
+                if not bbox or bbox == (0, 0, 0, 0):
+                    logger.warning(f"No fallback bbox for frame {i}, copying original")
+                    out_path = Path(clean_frames_dir) / frame_path.name
+                    cv2.imwrite(str(out_path), frame)
+                    continue
             
             # Generate mask
             mask = self.detector.generate_mask(frame.shape, bbox)
@@ -200,11 +212,16 @@ class VideoRemovalPipeline:
                 cv2.imwrite(str(out_path), frame)
                 continue
             
-            # Inpaint via API
-            clean_frame = self.inpainter.inpaint(frame, mask)
+            # Inpaint via API with mask dilation for better coverage
+            clean_frame = self.inpainter.inpaint(frame, mask, dilate_mask=5)
             
             if clean_frame is None:
-                logger.warning(f"Inpaint failed for frame {i}, using original")
+                logger.warning(f"Inpaint failed for frame {i}, retrying with larger mask")
+                # Retry with more dilation
+                clean_frame = self.inpainter.inpaint(frame, mask, dilate_mask=12)
+            
+            if clean_frame is None:
+                logger.warning(f"Inpaint retry failed for frame {i}, using original")
                 clean_frame = frame
             
             # Save clean frame

@@ -22,12 +22,13 @@ class WatermarkTracker:
     - Adaptive re-initialization when tracking confidence drops
     """
     
-    def __init__(self, fallback_threshold: int = 5):
+    def __init__(self, fallback_threshold: int = 1, bbox_margin: int = 10):
         """
         Initialize tracker.
         
         Args:
             fallback_threshold: Number of consecutive failures before using fallback bbox
+            bbox_margin: Extra pixels to add around tracked bbox for safety
         """
         self.tracker = None
         self.initialized = False
@@ -35,6 +36,7 @@ class WatermarkTracker:
         self.fallback_bbox = None
         self.consecutive_failures = 0
         self.fallback_threshold = fallback_threshold
+        self.bbox_margin = bbox_margin
         self.frame_count = 0
         
     def initialize(self, frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> bool:
@@ -119,7 +121,14 @@ class WatermarkTracker:
                     # Watermark shouldn't be more than half the frame
                     success = False
                 else:
-                    self.last_bbox = (x, y, w, h)
+                    # Apply margin for safety
+                    frame_h, frame_w = frame.shape[:2]
+                    mx = max(0, x - self.bbox_margin)
+                    my = max(0, y - self.bbox_margin)
+                    mw = min(w + 2 * self.bbox_margin, frame_w - mx)
+                    mh = min(h + 2 * self.bbox_margin, frame_h - my)
+                    
+                    self.last_bbox = (mx, my, mw, mh)
                     self.consecutive_failures = 0
                     self.frame_count += 1
                     

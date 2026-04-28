@@ -47,7 +47,7 @@ class WatermarkRemovalGUI:
         self.output_path = tk.StringVar(value=str(Path.home() / "Videos" / "output.mp4"))
         self.api_url = tk.StringVar(value="http://127.0.0.1:8080/api/v1/inpaint")
         self.model = tk.StringVar(value="lama")
-        self.resize_enabled = tk.BooleanVar(value=True)
+        self.resize_enabled = tk.BooleanVar(value=False)
         self.resize_w = tk.StringVar(value="640")
         self.resize_h = tk.StringVar(value="360")
         self.is_processing = False
