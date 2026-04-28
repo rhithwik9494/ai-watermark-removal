@@ -39,6 +39,30 @@ class WatermarkTracker:
         self.bbox_margin = bbox_margin
         self.frame_count = 0
         
+    def _create_tracker(self):
+        """Create best available OpenCV tracker with auto-fallback."""
+        # Priority order: CSRT (best for occlusion) > KCF (fast) > MIL (stable)
+        tracker_factories = [
+            ('CSRT', getattr(cv2, 'TrackerCSRT_create', None)),
+            ('KCF', getattr(cv2, 'TrackerKCF_create', None)),
+            ('MIL', getattr(cv2, 'TrackerMIL_create', None)),
+        ]
+        
+        for name, factory in tracker_factories:
+            if factory is None:
+                logger.debug(f"{name} tracker not available")
+                continue
+            try:
+                tracker = factory()
+                logger.info(f"Using {name} tracker")
+                return tracker, name
+            except cv2.error as e:
+                logger.debug(f"{name} tracker failed: {e}")
+                continue
+        
+        logger.warning("No OpenCV tracker available. Will use static bbox fallback only.")
+        return None, None
+    
     def initialize(self, frame: np.ndarray, bbox: Tuple[int, int, int, int]) -> bool:
         """
         Initialize tracker with first frame and bounding box.
@@ -51,8 +75,28 @@ class WatermarkTracker:
             True if initialization successful
         """
         try:
-            # CSRT tracker - good for handling occlusion and scale changes
-            self.tracker = cv2.TrackerCSRT_create()
+            # Try to create best available tracker
+            self.tracker, tracker_name = self._create_tracker()
+            if self.tracker is None:
+                # No tracker available - use static bbox fallback
+                h, w = frame.shape[:2]
+                x, y, bw, bh = bbox
+                x = max(0, min(x, w - 1))
+                y = max(0, min(y, h - 1))
+                bw = min(bw, w - x)
+                bh = min(bh, h - y)
+                
+                if bw < 10 or bh < 10:
+                    logger.error(f"Bounding box too small: {bw}x{bh}")
+                    return False
+                
+                bbox = (x, y, bw, bh)
+                self.initialized = True
+                self.last_bbox = bbox
+                self.fallback_bbox = bbox
+                self.frame_count = 0
+                logger.info(f"Static fallback tracker initialized with bbox: {bbox}")
+                return True
             
             # Ensure bbox is valid
             h, w = frame.shape[:2]
@@ -70,17 +114,17 @@ class WatermarkTracker:
                 
             bbox = (x, y, bw, bh)
             
-            success = self.tracker.init(frame, bbox)
-            
-            if success:
+            # OpenCV 4.x init() returns None on success, not True/False
+            try:
+                self.tracker.init(frame, bbox)
                 self.initialized = True
                 self.last_bbox = bbox
                 self.fallback_bbox = bbox
                 self.frame_count = 0
                 logger.info(f"Tracker initialized with bbox: {bbox}")
                 return True
-            else:
-                logger.error("Tracker initialization failed")
+            except Exception as e:
+                logger.error(f"Tracker initialization failed: {e}")
                 return False
                 
         except Exception as e:
