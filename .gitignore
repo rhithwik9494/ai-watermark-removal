@@ -1,0 +1,20 @@
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Frames (temporary data)
+video-ai/frames/
+video-ai/clean_frames/
+
+# Videos
+*.mp4
+*.avi
+
+# Temp files
+temp.png
+mask.png
+
+# OS
+.DS_Store
+Thumbs.db
