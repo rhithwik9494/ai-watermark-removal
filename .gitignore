@@ -2,14 +2,34 @@
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
 
-# Frames (temporary data)
+# Temporary data
+data/frames/*
+data/clean_frames/*
+data/outputs/*
+!data/frames/.gitkeep
+!data/clean_frames/.gitkeep
+!data/outputs/.gitkeep
+!data/videos/.gitkeep
+
+# Legacy
 video-ai/frames/
 video-ai/clean_frames/
 
 # Videos
 *.mp4
 *.avi
+*.mov
+*.mkv
+*.wmv
+
+# Logs
+logs/
+*.log
 
 # Temp files
 temp.png
@@ -18,3 +38,17 @@ mask.png
 # OS
 .DS_Store
 Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Model checkpoints
+*.pth
+*.ckpt
+
